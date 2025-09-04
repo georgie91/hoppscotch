@@ -1,11 +1,16 @@
-name: Build Hoppscotch Desktop (MSI)
+name: Build & Sign Hoppscotch Desktop (MSI)
 
 on:
   workflow_dispatch: {}
 
 jobs:
-  build-windows-msi:
+  build-sign-msi:
     runs-on: windows-latest
+
+    env:
+      PROJECT_PATH: packages/hoppscotch-selfhost-desktop
+      MSI_GLOB: packages/hoppscotch-selfhost-desktop/src-tauri/target/release/bundle/msi/*.msi
+      TIMESTAMP_URL: ${{ secrets.TIMESTAMP_URL || 'http://timestamp.digicert.com' }}
 
     steps:
       - name: Checkout
@@ -28,22 +33,82 @@ jobs:
       - name: Setup Rust (stable)
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Ensure WebView2 runtime (required at run-time)
-        run: |
-          echo "If your app fails to launch on test VM, install WebView2 Runtime."
-
-      # Build the Tauri app in the monorepo package:
       - name: Build Desktop (Tauri)
         uses: tauri-apps/tauri-action@v0
         with:
-          projectPath: packages/hoppscotch-selfhost-desktop
-          # If you want a 'Release' uploaded, also pass 'releaseDraft: true'
+          projectPath: ${{ env.PROJECT_PATH }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      # Grab the MSI that Tauri produced and expose it as a job artifact
-      - name: Upload MSI artifact
+      # --- Signing section ---
+      - name: Restore PFX from secret
+        shell: pwsh
+        run: |
+          $pfxBytes = [Convert]::FromBase64String("${{ secrets.CERT_PFX_B64 }}")
+          $pfxPath  = "$env:RUNNER_TEMP\codesign.pfx"
+          [IO.File]::WriteAllBytes($pfxPath, $pfxBytes)
+          Write-Host "PFX restored to $pfxPath"
+
+      - name: Locate MSI(s)
+        id: findmsi
+        shell: pwsh
+        run: |
+          $files = Get-ChildItem "${{ env.MSI_GLOB }}"
+          if (-not $files) { throw "No MSI files found at $env:MSI_GLOB" }
+          $list = $files | ForEach-Object { $_.FullName } | Join-String -Separator "`n"
+          "msi_list<<EOF" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          $list | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "EOF" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          Write-Host "Found:`n$list"
+
+      - name: Sign MSI(s)
+        shell: pwsh
+        run: |
+          $pfxPath = "$env:RUNNER_TEMP\codesign.pfx"
+          $password = "${{ secrets.CERT_PASSWORD }}"
+          $timestamp = "${{ env.TIMESTAMP_URL }}"
+          $files = @()
+          $lines = @'
+          ${{ steps.findmsi.outputs.msi_list }}
+          '@.Trim().Split("`n") | ForEach-Object { $_.Trim() } | Where-Object { $_ }
+          $files = $lines
+
+          foreach ($f in $files) {
+            Write-Host "Signing $f"
+            & "C:\Program Files (x86)\Windows Kits\10\bin\x64\signtool.exe" sign `
+              /fd sha256 `
+              /f "$pfxPath" /p "$password" `
+              /tr "$timestamp" /td sha256 `
+              "$f"
+            if ($LASTEXITCODE -ne 0) { throw "signtool sign failed for $f" }
+          }
+
+      - name: Verify signatures
+        shell: pwsh
+        run: |
+          $files = @()
+          $lines = @'
+          ${{ steps.findmsi.outputs.msi_list }}
+          '@.Trim().Split("`n") | ForEach-Object { $_.Trim() } | Where-Object { $_ }
+          $files = $lines
+
+          foreach ($f in $files) {
+            Write-Host "Verifying $f"
+            & "C:\Program Files (x86)\Windows Kits\10\bin\x64\signtool.exe" verify /pa /v "$f"
+            if ($LASTEXITCODE -ne 0) { throw "signtool verify failed for $f" }
+          }
+
+      - name: Securely remove PFX
+        if: always()
+        shell: pwsh
+        run: |
+          $pfxPath = "$env:RUNNER_TEMP\codesign.pfx"
+          if (Test-Path $pfxPath) {
+            Remove-Item -Path $pfxPath -Force
+          }
+
+      - name: Upload signed MSI
         uses: actions/upload-artifact@v4
         with:
-          name: hoppscotch-desktop-msi
-          path: packages/hoppscotch-selfhost-desktop/src-tauri/target/release/bundle/msi/*.msi
+          name: hoppscotch-desktop-msi-signed
+          path: ${{ env.MSI_GLOB }}
