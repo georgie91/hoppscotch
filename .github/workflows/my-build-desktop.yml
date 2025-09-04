@@ -11,6 +11,7 @@ env:
   PROJECT_PATH: packages/hoppscotch-selfhost-desktop
   MSI_GLOB: packages/hoppscotch-selfhost-desktop/src-tauri/target/release/bundle/msi/*.msi
   TIMESTAMP_URL: ${{ secrets.TIMESTAMP_URL || 'http://timestamp.digicert.com' }}
+  
 jobs:
   build-windows:
     runs-on: windows-latest
@@ -77,6 +78,8 @@ jobs:
         shell: powershell
         env:
           RUST_LOG: debug
+          TAURI_SIGNING_PRIVATE_KEY: ${{ env.RUNNER_TEMP }}\codesign.pfx
+          TAURI_SIGNING_PRIVATE_PASSWORD: ${{ secrets.CERT_PASSWORD }}
         run: pnpm --dir ${{ env.DESKTOP_PATH }} tauri build --verbose -b msi -b updater
         
       - name: Locate MSI(s)
