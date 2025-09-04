@@ -1,59 +1,84 @@
-name: Build & Sign Hoppscotch Desktop (MSI)
-
+name: Build Desktop Self Host - AIO
 on:
   workflow_dispatch: {}
-
+    
+env:
+  CARGO_TERM_COLOR: always
+  WORKSPACE_PATH: ${{ github.workspace }}
+  WEB_PATH: ${{ github.workspace }}/packages/hoppscotch-selfhost-web
+  DESKTOP_PATH: ${{ github.workspace }}/packages/hoppscotch-desktop
+  BUNDLER_PATH: ${{ github.workspace }}/packages/hoppscotch-desktop/crates/webapp-bundler
+  PROJECT_PATH: packages/hoppscotch-selfhost-desktop
+  MSI_GLOB: packages/hoppscotch-selfhost-desktop/src-tauri/target/release/bundle/msi/*.msi
+  TIMESTAMP_URL: ${{ secrets.TIMESTAMP_URL || 'http://timestamp.digicert.com' }}
 jobs:
-  build-sign-msi:
+  build-windows:
     runs-on: windows-latest
-
-    env:
-      PROJECT_PATH: packages/hoppscotch-selfhost-desktop
-      MSI_GLOB: packages/hoppscotch-selfhost-desktop/src-tauri/target/release/bundle/msi/*.msi
-      TIMESTAMP_URL: ${{ secrets.TIMESTAMP_URL || 'http://timestamp.digicert.com' }}
-
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        
-      - name: Install Node.js
-        uses: actions/setup-node@v4
+      - uses: actions/checkout@v3
+      
+      - uses: actions/setup-node@v3
         with:
-          node-version: 'lts/*'
+          node-version: 20
+          
+      - uses: pnpm/action-setup@v4
 
-      - name: Install pnpm
-        uses: pnpm/action-setup@v4
+      - uses: actions-rs/toolchain@v1
         with:
-          run_install: true
-
-      - name: Setup Rust (stable)
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Generate GraphQL types (web)
-        working-directory: packages/hoppscotch-selfhost-web
-        run: pnpm dlx graphql-codegen --require dotenv/config --config gql-codegen.yml dotenv_config_path="../../.env"
-
-      - name: Generate GraphQL types (desktop)
-        working-directory: packages/hoppscotch-selfhost-desktop
-        run: pnpm dlx graphql-codegen --require dotenv/config --config gql-codegen.yml dotenv_config_path="../../.env"
-
-
-      - name: Build Desktop (Tauri)
-        uses: tauri-apps/tauri-action@v0
-        with:
-          projectPath: ${{ env.PROJECT_PATH }}
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      # --- Signing section ---
-      - name: Restore PFX from secret
+          toolchain: nightly
+          override: true
+      
+      - name: Setting up Windows Signing Environment
+        timeout-minutes: 20
         shell: pwsh
         run: |
           $pfxBytes = [Convert]::FromBase64String("${{ secrets.CERT_PFX_B64 }}")
           $pfxPath  = "$env:RUNNER_TEMP\codesign.pfx"
           [IO.File]::WriteAllBytes($pfxPath, $pfxBytes)
           Write-Host "PFX restored to $pfxPath"
-
+          
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          
+      - name: Setup environment
+        shell: pwsh
+        run: |
+          if ("${{ secrets.ENV_FILE_CONTENT }}" -ne "") {
+            "${{ secrets.ENV_FILE_CONTENT }}" | Out-File -FilePath ${{ env.WORKSPACE_PATH }}\.env -Encoding utf8
+            Write-Host "Created .env file from repository secret"
+          } elseif (Test-Path -Path "${{ env.WORKSPACE_PATH }}\.env") {
+            Write-Host "Using existing .env file found in repository"
+          } else {
+            Copy-Item ${{ env.WORKSPACE_PATH }}\.env.example ${{ env.WORKSPACE_PATH }}\.env
+            Write-Host "No .env found, copied from .env.example template"
+          }
+          pnpm install -f --shamefully-hoist --ignore-scripts
+          pnpm --filter hoppscotch-backend exec prisma generate
+          pnpm install -f --shamefully-hoist --dir ${{ env.DESKTOP_PATH }}
+      - name: Build web app
+        shell: pwsh
+        run: |
+          pnpm install --dir ${{ env.WEB_PATH }}
+          pnpm --dir ${{ env.WEB_PATH }} generate
+      - name: Build and run webapp-bundler
+        shell: pwsh
+        run: |
+          cargo build --release --manifest-path ${{ env.BUNDLER_PATH }}\Cargo.toml
+          ${{ env.BUNDLER_PATH }}\target\release\webapp-bundler.exe `
+            --input ${{ env.WEB_PATH }}\dist `
+            --output ${{ env.DESKTOP_PATH }}\bundle.zip `
+            --manifest ${{ env.DESKTOP_PATH }}\manifest.json
+      - name: Build Tauri app without Azure signing
+        shell: powershell
+        env:
+          RUST_LOG: debug
+        run: pnpm --dir ${{ env.DESKTOP_PATH }} tauri build --verbose -b msi -b updater
+        
       - name: Locate MSI(s)
         id: findmsi
         shell: pwsh
@@ -117,3 +142,4 @@ jobs:
         with:
           name: hoppscotch-desktop-msi-signed
           path: ${{ env.MSI_GLOB }}
+  
