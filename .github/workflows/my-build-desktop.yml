@@ -29,6 +29,15 @@ jobs:
       - name: Setup Rust (stable)
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Generate GraphQL types (web)
+        working-directory: packages/hoppscotch-selfhost-web
+        run: pnpm dlx graphql-codegen --require dotenv/config --config gql-codegen.yml dotenv_config_path="../../.env"
+
+      - name: Generate GraphQL types (desktop)
+        working-directory: packages/hoppscotch-selfhost-desktop
+        run: pnpm dlx graphql-codegen --require dotenv/config --config gql-codegen.yml dotenv_config_path="../../.env"
+
+
       - name: Build Desktop (Tauri)
         uses: tauri-apps/tauri-action@v0
         with:
