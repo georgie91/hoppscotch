@@ -1,0 +1,49 @@
+name: Build Hoppscotch Desktop (MSI)
+
+on:
+  workflow_dispatch: {}
+
+jobs:
+  build-windows-msi:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 'lts/*'
+          cache: 'pnpm'
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Install workspace deps
+        run: pnpm install
+
+      - name: Setup Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Ensure WebView2 runtime (required at run-time)
+        run: |
+          echo "If your app fails to launch on test VM, install WebView2 Runtime."
+
+      # Build the Tauri app in the monorepo package:
+      - name: Build Desktop (Tauri)
+        uses: tauri-apps/tauri-action@v0
+        with:
+          projectPath: packages/hoppscotch-selfhost-desktop
+          # If you want a 'Release' uploaded, also pass 'releaseDraft: true'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # Grab the MSI that Tauri produced and expose it as a job artifact
+      - name: Upload MSI artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: hoppscotch-desktop-msi
+          path: packages/hoppscotch-selfhost-desktop/src-tauri/target/release/bundle/msi/*.msi
